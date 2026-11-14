@@ -1,0 +1,59 @@
+{
+  "location": "구좌읍",
+  "grid": {
+    "nx": 59,
+    "ny": 39
+  },
+  "base": "20261114 1400",
+  "daily": [
+    {
+      "date": "2026-11-14",
+      "pop_max": 60,
+      "rain_hours": 9,
+      "wind_max": 1.4,
+      "tmp_min": 18.0,
+      "tmp_max": 20.0
+    },
+    {
+      "date": "2026-11-15",
+      "pop_max": 60,
+      "rain_hours": 4,
+      "wind_max": 5.4,
+      "tmp_min": 16.0,
+      "tmp_max": 19.0
+    },
+    {
+      "date": "2026-11-16",
+      "pop_max": 60,
+      "rain_hours": 4,
+      "wind_max": 7.1,
+      "tmp_min": 14.0,
+      "tmp_max": 19.0
+    },
+    {
+      "date": "2026-11-17",
+      "pop_max": 60,
+      "rain_hours": 4,
+      "wind_max": 6.8,
+      "tmp_min": 17.0,
+      "tmp_max": 21.0
+    },
+    {
+      "date": "2026-11-18",
+      "pop_max": 60,
+      "rain_hours": 1,
+      "wind_max": 2.0,
+      "tmp_min": 16.0,
+      "tmp_max": 16.0
+    }
+  ],
+  "unit": {
+    "pop_max": "%",
+    "rain_hours": "시간",
+    "wind_max": "m/s",
+    "tmp_min": "℃",
+    "tmp_max": "℃"
+  },
+  "source": "기상청 단기예보 조회서비스 (공공데이터포털)",
+  "data_status": "live"
+}

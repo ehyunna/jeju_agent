@@ -1,6 +1,7 @@
 # config.py
 # 공통 설정값 (모델명, 재시도 횟수 등). 환경변수로 덮어쓸 수 있음.
 import os
+from dotenv import load_dotenv
 
 MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 LLM_TIMEOUT = 15
