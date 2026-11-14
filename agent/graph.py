@@ -1,10 +1,12 @@
 # agent/graph.py
-from langgraph.graph import StateGraph, END
-from agent.state import GamgyulState
-from agent.nodes import intent_router, data_fetcher, analyzer, response_generator
+from langgraph.graph import END, StateGraph
+
+from agent.nodes import analyzer, data_fetcher, intent_router, response_generator
+from agent.state import CarrotState
+
 
 def build_graph():
-    graph = StateGraph(GamgyulState)
+    graph = StateGraph(CarrotState)
 
     graph.add_node("intent_router", intent_router)
     graph.add_node("data_fetcher", data_fetcher)
@@ -19,20 +21,25 @@ def build_graph():
 
     return graph.compile()
 
-def run_agent(user_query: str) -> GamgyulState:
+
+def run_agent(user_query: str) -> CarrotState:
     app = build_graph()
-    initial_state: GamgyulState = {
+    initial_state: CarrotState = {
         "user_query": user_query,
         "intent": None,
+        "params": {},
         "fetched_data": {},
         "analysis": None,
         "final_answer": None,
+        "validation": None,
+        "sources": [],
         "errors": [],
         "retry_count": 0,
     }
     return app.invoke(initial_state)
 
+
 if __name__ == "__main__":
-    result = run_agent("오늘 감귤 출하하면 좋을까?")
+    result = run_agent("요즘 제주 세척당근 가격 작년보다 어때?")
     print("\n=== 최종 결과 ===")
     print(result)
