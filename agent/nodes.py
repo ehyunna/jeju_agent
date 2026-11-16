@@ -1,9 +1,4 @@
 # agent/nodes.py
-import os
-from datetime import date
-
-from dotenv import load_dotenv
-from langchain_google_genai import ChatGoogleGenerativeAI# agent/nodes.py
 import calendar
 import importlib.util
 import json
@@ -15,7 +10,7 @@ import pandas as pd
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-from agent.prompts import GENERAL_PROMPT, INTENT_PROMPT, RESPONSE_PROMPT
+from agent.prompts import GENERAL_PROMPT, INTENT_PROMPT, RESPONSE_PROMPT, RETRY_NOTE
 from agent.schemas import IntentClassification
 from agent.state import CarrotState
 from agent.utils import with_retry
@@ -46,6 +41,7 @@ NEEDS = {
 }
 DEFAULT_DAYS = 60  # 월을 지정하지 않았을 때 최근 며칠을 볼지
 MIN_MARKET_VOLUME = 0.1  # 시장별 표에 넣을 최소 거래량(톤). 소량 거래의 이상값 제외
+MIN_DAY_VOLUME = 0.3     # 일별 추이 차트에 넣을 하루 최소 거래량(톤). 소량 거래일의 튀는 가격 제외
 STATUS_KO = {
     "cache": "API 연결이 불안정해 저장된 데이터",
     "mock": "테스트용 저장 데이터",
@@ -132,6 +128,10 @@ def data_fetcher(state: CarrotState) -> CarrotState:
     intent = state.get("intent") or "general"
     params = dict(state.get("params") or {})
     need_trade, need_weather = NEEDS.get(intent, (False, False))
+    if intent == "shipment_timing":
+        # 예보는 앞으로 며칠뿐이라, 질문한 기간이 이번 달(또는 기간 미지정)일 때만 날씨를 가져온다
+        months = [str(m) for m in (params.get("months") or [])]
+        need_weather = not months or date.today().strftime("%Y%m") in months
     fetched, sources = {}, []
 
     if need_trade:
@@ -208,12 +208,13 @@ def _basic_analysis(state: CarrotState) -> dict:
             caveats.append(f"{cultivar}: 조회 기간에 거래 데이터가 없어요.")
             continue
         avg = _wavg(df)
-        prev_avg = None
+        prev_avg = prev_vol = None
         prev_result = (fetched.get("jeju_hub_prev") or {}).get(cultivar)
         if prev_result:
             prev_df = _records_df(prev_result)
             if not prev_df.empty:
                 prev_avg = _wavg(prev_df)
+                prev_vol = float(prev_df["volume_ton"].sum())
         change = (avg - prev_avg) / prev_avg * 100 if avg and prev_avg else None
 
         facts[cultivar] = {
@@ -230,6 +231,12 @@ def _basic_analysis(state: CarrotState) -> dict:
                 monthly[ym] = round(m_avg)
         if len(monthly) > 1:
             facts[cultivar]["월별 가중평균가(원/kg)"] = monthly
+            (m1, a1), (m2, a2) = sorted(monthly.items())[-2:]
+            facts[cultivar]["최근 월 대비 변동"] = {"기준": f"{m1} → {m2}", "변동률(%)": round((a2 - a1) / a1 * 100, 1)}
+        if prev_vol:
+            vol = float(df["volume_ton"].sum())
+            facts[cultivar]["전년 같은 기간 총거래량(톤)"] = round(prev_vol, 1)
+            facts[cultivar]["전년 대비 거래량 변동률(%)"] = round((vol - prev_vol) / prev_vol * 100, 1)
         if float(df["volume_ton"].sum()) < 5:
             caveats.append(f"{cultivar}: 조회 기간 총 거래량이 적어(5톤 미만) 가격의 대표성이 낮아요.")
 
@@ -251,6 +258,18 @@ def _basic_analysis(state: CarrotState) -> dict:
             })
         daily_frames.append(df.assign(cultivar=cultivar))
 
+    if "세척당근" in facts and "흙당근" in facts:  # 두 품목 가격 차이는 코드로 계산해 LLM이 틀리지 않게 한다
+        w, s = facts["세척당근"].get("가중평균가(원/kg)"), facts["흙당근"].get("가중평균가(원/kg)")
+        if w and s:
+            pct = (s - w) / w * 100
+            verdict = "비슷함(차이 5% 미만)" if abs(pct) < 5 else (
+                "흙당근이 세척당근보다 높음" if pct > 0 else "세척당근이 흙당근보다 높음")
+            facts["세척-흙 비교"] = {
+                "세척당근 가중평균가(원/kg)": w, "흙당근 가중평균가(원/kg)": s,
+                "흙당근-세척당근 차이(원/kg)": s - w, "차이율(%) (세척당근 기준)": round(pct, 1),
+                "판정": verdict,
+            }
+
     analysis = {
         "metrics": metrics,
         "table": table,
@@ -259,10 +278,31 @@ def _basic_analysis(state: CarrotState) -> dict:
         "caveats": caveats,
     }
 
+    market = (params.get("market") or "").strip()
+    stem = re.sub(r"(도매시장|도매|시장|청과)$", "", market)
+    if stem:  # 질문에서 지정한 시장은 거래량이 적어도 따로 보여 준다 (예: '가락시장' → '서울가락도매')
+        focus = []
+        for cultivar, result in (fetched.get("jeju_hub") or {}).items():
+            df = _records_df(result)
+            sub = df[df["market"].str.contains(stem, regex=False)] if not df.empty else df
+            if sub.empty:
+                continue
+            avg = _wavg(sub) or float(sub["price"].mean())
+            focus.append({
+                "품목": cultivar, "시장": ", ".join(sorted(sub["market"].unique())),
+                "가중평균가(원/kg)": round(avg), "거래량(톤)": round(float(sub["volume_ton"].sum()), 1),
+            })
+        analysis["market_focus"] = {
+            "요청 시장": market,
+            "결과": focus or "조회 기간에 해당 시장의 거래 기록이 없어요",
+        }
+
     if daily_frames:  # 일별 가중평균 추이 차트
         all_df = pd.concat(daily_frames)
         g = all_df.groupby(["date", "cultivar"])[["pv", "volume_ton"]].sum()
-        g = g[g["volume_ton"] > 0]
+        major = g[g["volume_ton"] >= MIN_DAY_VOLUME]
+        g = major if not major.empty else g[g["volume_ton"] > 0]  # 전부 소량이면 그대로 표시
+        g = g.copy()
         g["avg"] = (g["pv"] / g["volume_ton"]).round()
         pivot = g["avg"].unstack("cultivar").reset_index()
         analysis["chart"] = {
@@ -348,7 +388,7 @@ def response_generator(state: CarrotState) -> CarrotState:
         shown = {k: v for k, v in analysis.items() if k != "chart"} if isinstance(analysis, dict) else analysis
         statuses = [s for s in (analysis.get("data_status") or []) if s != "live"] if isinstance(analysis, dict) else []
         status_note = (
-            f"13. 실시간 데이터가 아니라 {', '.join(STATUS_KO.get(s, s) for s in statuses)} 기준임을 답변 끝에 한 줄로 밝히세요.\n"
+            f"16. 실시간 데이터가 아니라 {', '.join(STATUS_KO.get(s, s) for s in statuses)} 기준임을 답변 끝에 한 줄로 밝히세요.\n"
             if statuses else ""
         )
         prompt = RESPONSE_PROMPT.format(
@@ -356,6 +396,14 @@ def response_generator(state: CarrotState) -> CarrotState:
             intent=state.get("intent"),
             query=query,
             analysis=json.dumps(shown, ensure_ascii=False, default=str, indent=1),
+        )
+
+    # 검증에 실패해 다시 쓰는 경우: 이전 답변과 문제점을 알려 준다
+    issues = (state.get("validation") or {}).get("issues") or []
+    if state.get("retry_count", 0) > 0 and issues:
+        prompt += RETRY_NOTE.format(
+            previous=state.get("final_answer") or "",
+            issues="\n".join(f"- {i}" for i in issues),
         )
 
     try:
@@ -368,76 +416,26 @@ def response_generator(state: CarrotState) -> CarrotState:
     return state
 
 
-from agent.schemas import IntentClassification
-from agent.state import CarrotState
-from agent.utils import with_retry
-from config import LLM_TIMEOUT, MODEL_NAME
-
-load_dotenv()
-
-llm = ChatGoogleGenerativeAI(
-    model=MODEL_NAME,
-    temperature=0,
-    google_api_key=os.getenv("GEMINI_API_KEY"),
-    timeout=LLM_TIMEOUT,
-)
-
-structured_llm = llm.with_structured_output(IntentClassification)
-
-INTENT_PROMPT = """당신은 제주 당근(세척당근·흙당근) 농가를 위한 AI 에이전트의 의도 분류기입니다.
-사용자의 질문을 아래 7가지 중 하나로 분류하고, 질문에서 파라미터도 함께 추출하세요.
-
-- price_query: 가격·시세 조회, 작년/전월 대비 가격 변화
-- shipment_timing: 언제 출하/판매하는 게 나은지 (월 비교 포함)
-- volume_status: 거래량·반입량이 많은지/적은지
-- weather_impact: 한파·폭우·가뭄 등 날씨가 가격에 미치는 영향
-- market_compare: 도매시장(가락시장 등) 간 가격 비교
-- wash_vs_soil: 세척당근과 흙당근 비교
-- general: 위에 해당하지 않거나 당근과 무관한 질문
-
-규칙:
-- 두 품목을 비교하는 질문이면 wash_vs_soil.
-- 품목 언급이 없거나 '당근'이라고만 하면 product=both.
-- months는 YYYYMM 형식. 연도가 없으면 오늘 날짜 기준으로 추정.
-
-오늘 날짜: {today}
-사용자 질문: {query}
-"""
-
-
-def _classify_intent(query: str) -> IntentClassification:
-    prompt = INTENT_PROMPT.format(today=date.today().isoformat(), query=query)
-    return with_retry(lambda: structured_llm.invoke(prompt))
-
-
-def intent_router(state: CarrotState) -> CarrotState:
+# ---------------------------------------------------------------
+# 5) 검증 / 재시도 준비
+# ---------------------------------------------------------------
+def validator(state: CarrotState) -> CarrotState:
+    """답변 검증. agent/validators.py의 validate(state)를 호출 (C의 파일이 오면 그걸 사용)"""
     state.setdefault("errors", [])
     try:
-        result = _classify_intent(state["user_query"])
-        state["intent"] = result.intent
-        state["params"] = result.params.model_dump()
-        print(f"[intent_router] 분류: {result.intent} / {state['params']} ({result.reason})")
-    except Exception as e:  # noqa: BLE001
-        state["errors"].append(f"intent_router 오류: {e}")
-        state["intent"] = "general"
-        state["params"] = {}
-        print(f"[intent_router] 오류 발생, general로 폴백: {e}")
+        from agent.validators import validate
+        result = validate(state)
+    except Exception as e:  # noqa: BLE001  검증기 자체 오류는 답변을 막지 않고 기록만 남김
+        state["errors"].append(f"validator 오류: {e}")
+        result = {"passed": True, "issues": [f"검증기 오류로 검증을 건너뛰었어요: {e}"]}
+    state["validation"] = result
+    status = "통과" if result.get("passed") else f"실패 {result.get('issues')}"
+    print(f"[validator] {status} (retry_count={state.get('retry_count', 0)})")
     return state
 
 
-def data_fetcher(state: CarrotState) -> CarrotState:
-    print("[data_fetcher] 실행됨")
-    state["fetched_data"] = {}    # TODO: B 작업물 연결 예정
-    return state
-
-
-def analyzer(state: CarrotState) -> CarrotState:
-    print("[analyzer] 실행됨")
-    state["analysis"] = "분석 결과 placeholder"
-    return state
-
-
-def response_generator(state: CarrotState) -> CarrotState:
-    print("[response_generator] 실행됨")
-    state["final_answer"] = "최종 응답 placeholder"
+def retry_prep(state: CarrotState) -> CarrotState:
+    """검증 실패 후 답변을 다시 만들기 전에 재시도 횟수를 올린다"""
+    state["retry_count"] = state.get("retry_count", 0) + 1
+    print(f"[retry_prep] 답변 재생성 {state['retry_count']}회차")
     return state
