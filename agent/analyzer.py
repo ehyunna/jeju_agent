@@ -23,6 +23,7 @@ MIN_MARKET_VOLUME = 0.1      # 시장별 표에 넣을 최소 거래량(톤)
 LOW_VOLUME_TON = 5           # 기간 총 거래량이 이보다 적으면 "대표성 낮음"
 RELIABLE_MARKET_DAYS = 3     # 시장 비교 때 거래일이 이보다 적으면 "참고용"
 RELIABLE_MARKET_TON = 1.0    # 시장 비교 때 거래량(톤)이 이보다 적으면 "참고용"
+RELIABLE_MARKET_SHARE = 2.0  # 시장 비교 때 전체 거래량 중 비중(%)이 이보다 작으면 "참고용"
 SIMILAR_PCT = 5              # 차이가 이보다 작으면 "비슷해요" (응답 프롬프트 규칙 10과 같게)
 MIN_PAIRS = 5                # 세척·흙 짝 비교에 필요한 최소 짝 수
 RECENT_DAYS = 14             # "최근 흐름" 비교 기간
@@ -154,6 +155,13 @@ def market_summary(df: pd.DataFrame) -> pd.DataFrame:
     return g.sort_values("volume_ton", ascending=False)
 
 
+def common_markets(df: pd.DataFrame, prev_df: pd.DataFrame):
+    """두 기간에 모두 거래된 시장만 남김. 해마다 집계되는 시장 수가 달라서
+    (예: 2026년부터 시장·법인이 크게 늘어남) 전체 합계끼리 비교하면 왜곡되기 때문."""
+    common = sorted(set(df["market"]) & set(prev_df["market"]))
+    return df[df["market"].isin(common)], prev_df[prev_df["market"].isin(common)], common
+
+
 def fmt_date(yyyymmdd: Optional[str]) -> Optional[str]:
     """20261101 → 2026년 11월 1일"""
     if not yyyymmdd or len(str(yyyymmdd)) != 8:
@@ -177,8 +185,18 @@ def summarize_cultivars(fetched: dict, out: dict) -> dict:
 
         avg = wavg(df)
         prev_df = records_df((fetched.get("jeju_hub_prev") or {}).get(cultivar))
-        prev_avg = wavg(prev_df) if not prev_df.empty else None
-        change = pct(avg, prev_avg)
+        prev_avg = change = None
+        common = []
+        if not prev_df.empty:
+            cur_c, prev_c, common = common_markets(df, prev_df)
+            prev_avg = wavg(prev_c)
+            change = pct(wavg(cur_c), prev_avg)
+            n_cur, n_prev = df["market"].nunique(), prev_df["market"].nunique()
+            if n_cur != n_prev or len(common) < max(n_cur, n_prev):
+                out["caveats"].append(
+                    f"{cultivar}: 거래 시장 수가 올해 {n_cur}곳, 전년 {n_prev}곳으로 달라서 "
+                    f"두 해 모두 거래된 {len(common)}곳만 골라 전년과 비교했어요."
+                )
         total_vol = float(df["volume_ton"].sum())
 
         out["facts"][cultivar] = {
@@ -188,7 +206,9 @@ def summarize_cultivars(fetched: dict, out: dict) -> dict:
             "거래 시장 수": int(df["market"].nunique()),
         }
         if prev_avg:
-            out["facts"][cultivar]["전년 같은 기간 가중평균가(원/kg)"] = r0(prev_avg)
+            out["facts"][cultivar]["전년 대비 비교 기준"] = f"두 해 모두 거래된 시장 {len(common)}곳"
+            out["facts"][cultivar]["공통 시장 올해 가중평균가(원/kg)"] = r0(wavg(common_markets(df, prev_df)[0]))
+            out["facts"][cultivar]["공통 시장 전년 가중평균가(원/kg)"] = r0(prev_avg)
             out["facts"][cultivar]["전년 대비 변동률(%)"] = r1(change)
             out["facts"][cultivar]["전년 대비 판정"] = verdict(change)
 
@@ -199,7 +219,7 @@ def summarize_cultivars(fetched: dict, out: dict) -> dict:
             out["metrics"].append({
                 "label": f"{cultivar} 가중평균가",
                 "value": f"{avg:,.0f}원/kg",
-                "delta": f"{change:+.1f}% (전년 대비)" if change is not None else None,
+                "delta": f"{change:+.1f}% (전년 대비, 공통 시장)" if change is not None else None,
             })
     return frames
 
@@ -264,11 +284,15 @@ def analyze_market(frames: dict, out: dict, target_market: Optional[str]):
     chart_rows = {}
     for cultivar, df in frames.items():
         ms = market_summary(df)
-        ok = (ms["days"] >= RELIABLE_MARKET_DAYS) & (ms["volume_ton"] >= RELIABLE_MARKET_TON)
+        share = ms["volume_ton"] / ms["volume_ton"].sum() * 100
+        ok = (ms["days"] >= RELIABLE_MARKET_DAYS) & (ms["volume_ton"] >= RELIABLE_MARKET_TON) \
+            & (share >= RELIABLE_MARKET_SHARE)
         reliable = ms[ok]
         info = {
             "시장별 가중평균가(원/kg)": {m: r0(p) for m, p in ms["price"].head(8).items()},
-            "거래일·거래량이 적어 참고용인 시장": list(ms.index[~ok])[:8],
+            "시장별 거래량 비중(%)": {m: r1(v) for m, v in share.head(8).items()},
+            "비교 기준": f"거래일 {RELIABLE_MARKET_DAYS}일 이상, 거래량 비중 {RELIABLE_MARKET_SHARE:g}% 이상인 시장 {int(ok.sum())}곳",
+            "거래량이 적어 참고용인 시장": list(ms.index[~ok])[:8],
         }
         if len(reliable) >= 2:
             hi, lo = reliable["price"].idxmax(), reliable["price"].idxmin()
@@ -283,7 +307,8 @@ def analyze_market(frames: dict, out: dict, target_market: Optional[str]):
             info["판정"] = verdict(info["두 시장 차이(%)"], diff.get("ci_low"), diff.get("ci_high"))
         else:
             out["caveats"].append(
-                f"{cultivar}: 거래일 {RELIABLE_MARKET_DAYS}일·거래량 {RELIABLE_MARKET_TON:g}톤 이상인 시장이 2곳 미만이라 시장 비교의 신뢰도가 낮아요."
+                f"{cultivar}: 거래일 {RELIABLE_MARKET_DAYS}일·거래량 비중 {RELIABLE_MARKET_SHARE:g}% 이상인 시장이 "
+                "2곳 미만이라 시장 비교의 신뢰도가 낮아요."
             )
 
         if target_market:
@@ -398,13 +423,21 @@ def analyze_volume(frames: dict, fetched: dict, out: dict):
         }
         prev_df = records_df((fetched.get("jeju_hub_prev") or {}).get(cultivar))
         if not prev_df.empty:
-            prev_total, total = float(prev_df["volume_ton"].sum()), float(df["volume_ton"].sum())
+            cur_c, prev_c, common = common_markets(df, prev_df)
+            prev_total, total = float(prev_c["volume_ton"].sum()), float(cur_c["volume_ton"].sum())
             change = pct(total, prev_total)
-            info["전년 같은 기간 총거래량(톤)"] = r1(prev_total)
+            info["전년 대비 비교 기준"] = f"두 해 모두 거래된 시장 {len(common)}곳"
+            info["공통 시장 올해 총거래량(톤)"] = r1(total)
+            info["공통 시장 전년 총거래량(톤)"] = r1(prev_total)
             info["전년 대비 거래량 변동률(%)"] = r1(change)
             info["판정"] = verdict(change)
         out["facts"][cultivar]["거래량"] = info
 
+    if fetched.get("jeju_hub_prev"):
+        out["caveats"].append(
+            "허브 데이터는 2026년 3월 무렵부터 집계되는 거래 건수가 크게 늘어, 같은 시장끼리 비교해도 "
+            "거래량 증가에는 집계 범위 변화가 섞여 있을 수 있어요."
+        )
     parts = []
     for cultivar, df in frames.items():
         d = df.groupby("date")["volume_ton"].sum().rename(cultivar)
