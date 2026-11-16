@@ -119,7 +119,21 @@ def show_details(result: dict):
             st.warning(err)
 
 
+def show_data_status(analysis):
+    """B 요청: 실시간이 아닌 데이터로 답했으면 화면에 표시 (data_status: live / cache / mock)"""
+    if not isinstance(analysis, dict):
+        return
+    statuses = analysis.get("data_status") or []
+    if isinstance(statuses, str):
+        statuses = [statuses]
+    if "cache" in statuses:
+        st.info("💾 저장된 데이터 사용 중 — 허브 API 연결이 불안정해 마지막으로 저장된 데이터로 답했어요.")
+    elif "mock" in statuses:
+        st.info("🧪 테스트용 저장 데이터로 답했어요 (USE_MOCK_DATA=true).")
+
+
 def show_assistant_message(result: dict):
+    show_data_status(result.get("analysis"))
     st.markdown(result.get("final_answer") or "답변을 만들지 못했어요.")
     show_analysis(result.get("analysis"))
 
