@@ -10,7 +10,7 @@ import pandas as pd
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-from agent.prompts import GENERAL_PROMPT, INTENT_PROMPT, RESPONSE_PROMPT, RETRY_NOTE
+from agent.prompts import GENERAL_PROMPT, INTENT_PROMPT, RESPONSE_PROMPT
 from agent.schemas import IntentClassification
 from agent.state import CarrotState
 from agent.utils import with_retry
@@ -388,7 +388,7 @@ def response_generator(state: CarrotState) -> CarrotState:
         shown = {k: v for k, v in analysis.items() if k != "chart"} if isinstance(analysis, dict) else analysis
         statuses = [s for s in (analysis.get("data_status") or []) if s != "live"] if isinstance(analysis, dict) else []
         status_note = (
-            f"16. 실시간 데이터가 아니라 {', '.join(STATUS_KO.get(s, s) for s in statuses)} 기준임을 답변 끝에 한 줄로 밝히세요.\n"
+            f"17. 실시간 데이터가 아니라 {', '.join(STATUS_KO.get(s, s) for s in statuses)} 기준임을 답변 끝에 한 줄로 밝히세요.\n"
             if statuses else ""
         )
         prompt = RESPONSE_PROMPT.format(
@@ -399,12 +399,10 @@ def response_generator(state: CarrotState) -> CarrotState:
         )
 
     # 검증에 실패해 다시 쓰는 경우: 이전 답변과 문제점을 알려 준다
-    issues = (state.get("validation") or {}).get("issues") or []
-    if state.get("retry_count", 0) > 0 and issues:
-        prompt += RETRY_NOTE.format(
-            previous=state.get("final_answer") or "",
-            issues="\n".join(f"- {i}" for i in issues),
-        )
+    validation = state.get("validation") or {}
+    if state.get("retry_count", 0) > 0 and validation.get("issues"):
+        from agent.validators import retry_hint  # C 담당: 실패 이유를 프롬프트 문장으로 변환
+        prompt += f"\n\n[이전 답변]\n{state.get('final_answer') or ''}\n\n{retry_hint(validation)}\n"
 
     try:
         state["final_answer"] = _text(with_retry(lambda: llm.invoke(prompt)).content).strip()
@@ -420,14 +418,20 @@ def response_generator(state: CarrotState) -> CarrotState:
 # 5) 검증 / 재시도 준비
 # ---------------------------------------------------------------
 def validator(state: CarrotState) -> CarrotState:
-    """답변 검증. agent/validators.py의 validate(state)를 호출 (C의 파일이 오면 그걸 사용)"""
+    """답변 검증. C의 validate(답변, 분석 결과) + A의 추가 검사(extra_issues)"""
     state.setdefault("errors", [])
     try:
-        from agent.validators import validate
-        result = validate(state)
+        from agent.validators import validate  # C 담당
+        from agent.validators_extra import extra_issues  # A 담당: 규칙 문장 유출, 분석에 없는 시장 이름
+        answer, analysis = state.get("final_answer"), state.get("analysis")
+        result = validate(answer, analysis)
+        extra = extra_issues(answer, analysis)
+        if extra:
+            result["issues"] = list(result.get("issues") or []) + extra
+            result["passed"] = False
     except Exception as e:  # noqa: BLE001  검증기 자체 오류는 답변을 막지 않고 기록만 남김
         state["errors"].append(f"validator 오류: {e}")
-        result = {"passed": True, "issues": [f"검증기 오류로 검증을 건너뛰었어요: {e}"]}
+        result = {"passed": True, "issues": [], "warnings": [f"검증기 오류로 검증을 건너뛰었어요: {e}"]}
     state["validation"] = result
     status = "통과" if result.get("passed") else f"실패 {result.get('issues')}"
     print(f"[validator] {status} (retry_count={state.get('retry_count', 0)})")
