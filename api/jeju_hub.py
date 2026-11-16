@@ -1,5 +1,6 @@
 """제주데이터허브 「농산물 품종별 일일 거래 정보」 API 클라이언트"""
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -16,19 +17,37 @@ COLS = {
 }
 
 
-def _request(cultivar, start, end, tries=5):
-    """허브 서버가 502를 자주 내서 실패하면 1, 2, 3...초 기다렸다 재시도"""
+PAGE_LIMIT = 100  # 허브는 limit 없이 요청하면 10건만 주고, 200 이상은 서버 오류(500/502)가 남
+
+
+def _call(cultivar, start, end, tries=5):
+    """허브 서버가 502를 자주 내서 실패하면 1, 2, 3...초 기다렸다 재시도. 응답 JSON 전체를 반환"""
     url = f"{JEJU_HUB_TRADE_URL}/{JEJU_HUB_KEY}"
-    params = {"startDate": start, "endDate": end, "cultivar": cultivar}
+    params = {"startDate": start, "endDate": end, "cultivar": cultivar, "limit": PAGE_LIMIT}
     for i in range(tries):
         try:
             r = requests.get(url, params=params, timeout=15)
             if r.status_code == 200:
-                return r.json().get("data", [])
+                return r.json()
         except (requests.RequestException, ValueError):
             pass
         time.sleep(1 + i)
     raise ConnectionError(f"허브 API {tries}회 실패: {cultivar} {start}~{end}")
+
+
+def _request(cultivar, start, end, tries=5):
+    """기간 내 전체 거래 기록. 응답에 hasMore=True면 기간을 반으로 나눠 나머지도 모두 가져옴"""
+    j = _call(cultivar, start, end, tries)
+    data = j.get("data", [])
+    if j.get("hasMore") and start < end:
+        s = datetime.strptime(start, "%Y%m%d")
+        e = datetime.strptime(end, "%Y%m%d")
+        mid = s + (e - s) / 2
+        mid = datetime(mid.year, mid.month, mid.day)
+        left_end = mid.strftime("%Y%m%d")
+        right_start = (mid + timedelta(days=1)).strftime("%Y%m%d")
+        return _request(cultivar, start, left_end, tries) + _request(cultivar, right_start, end, tries)
+    return data
 
 
 def _to_df(rows):
