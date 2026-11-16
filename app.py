@@ -108,9 +108,11 @@ def show_details(result: dict):
         if validation:
             ok = validation.get("passed") if isinstance(validation, dict) else None
             st.markdown(f"**검증:** {'✅ 통과' if ok else '⚠️ 확인 필요' if ok is False else validation}")
-            if isinstance(validation, dict) and validation.get("issues"):
-                for issue in validation["issues"]:
-                    st.caption(f"- {issue}")
+            if isinstance(validation, dict):
+                for issue in validation.get("issues") or []:
+                    st.caption(f"- ❌ {issue}")
+                for warn in validation.get("warnings") or []:
+                    st.caption(f"- 💡 {warn}")
 
         if result.get("retry_count"):
             st.markdown(f"**재시도 횟수:** {result['retry_count']}")
