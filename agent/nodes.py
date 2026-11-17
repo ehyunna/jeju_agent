@@ -42,6 +42,7 @@ NEEDS = {
 DEFAULT_DAYS = 60  # 월을 지정하지 않았을 때 최근 며칠을 볼지
 MIN_MARKET_VOLUME = 0.1  # 시장별 표에 넣을 최소 거래량(톤). 소량 거래의 이상값 제외
 MIN_DAY_VOLUME = 0.3     # 일별 추이 차트에 넣을 하루 최소 거래량(톤). 소량 거래일의 튀는 가격 제외
+WEATHER_KEYWORDS = ["날씨", "기온", "한파", "강풍", "태풍", "예보", "추위", "바람"]
 STATUS_KO = {
     "cache": "API 연결이 불안정해 저장된 데이터",
     "mock": "테스트용 저장 데이터",
@@ -132,6 +133,8 @@ def data_fetcher(state: CarrotState) -> CarrotState:
         # 예보는 앞으로 며칠뿐이라, 질문한 기간이 이번 달(또는 기간 미지정)일 때만 날씨를 가져온다
         months = [str(m) for m in (params.get("months") or [])]
         need_weather = not months or date.today().strftime("%Y%m") in months
+    if intent != "general" and any(w in (state.get("user_query") or "") for w in WEATHER_KEYWORDS):
+        need_weather = True  # 의도가 섞여도 질문에 날씨 이야기가 있으면 예보를 같이 가져온다
     fetched, sources = {}, []
 
     if need_trade:
@@ -425,7 +428,7 @@ def validator(state: CarrotState) -> CarrotState:
         from agent.validators_extra import extra_issues  # A 담당: 규칙 문장 유출, 분석에 없는 시장 이름
         answer, analysis = state.get("final_answer"), state.get("analysis")
         result = validate(answer, analysis)
-        extra = extra_issues(answer, analysis)
+        extra = extra_issues(answer, analysis, state.get("user_query"))
         if extra:
             result["issues"] = list(result.get("issues") or []) + extra
             result["passed"] = False
