@@ -2,15 +2,18 @@
 # 테스트 질문 일괄 실행.
 #   python -W ignore -m tests.run_questions          → 의도 분류만 검사 (빠르고 저렴)
 #   python -W ignore -m tests.run_questions --full   → 전체 흐름 실행 (검증 통과/재시도, 답변 확인)
-# 결과는 tests/results.csv 로 저장됨 (엑셀로 열어 기획서·결과 설명자료에 사용)
+#   python -W ignore -m tests.run_questions --edge   → 엣지 케이스 12개만 (--full과 같이 쓸 수 있음)
+# 결과는 tests/results.csv (엣지는 tests/results_edge.csv) 로 저장됨 (엑셀로 열어 기획서·결과 설명자료에 사용)
 import csv
 import sys
 import time
 from pathlib import Path
 
-from tests.questions import QUESTIONS
+from tests.questions import EDGE_QUESTIONS, QUESTIONS
 
-OUT = Path(__file__).resolve().parent / "results.csv"
+EDGE = "--edge" in sys.argv
+CASES = EDGE_QUESTIONS if EDGE else QUESTIONS
+OUT = Path(__file__).resolve().parent / ("results_edge.csv" if EDGE else "results.csv")
 
 
 def check_params(case, params):
@@ -33,7 +36,7 @@ def main():
         from agent.nodes import _classify_intent
 
     rows, ok_intent, ok_params = [], 0, 0
-    for i, case in enumerate(QUESTIONS, 1):
+    for i, case in enumerate(CASES, 1):
         q = case["q"]
         row = {"번호": i, "질문": q, "기대의도": case["intent"]}
         try:
@@ -44,6 +47,8 @@ def main():
                 row.update({
                     "검증": "통과" if v.get("passed") else "실패",
                     "재시도": r.get("retry_count", 0),
+                    "검증이슈": " | ".join(v.get("issues") or []),
+                    "경고": " | ".join(v.get("warnings") or []),
                     "오류": " | ".join(r.get("errors") or []),
                     "답변": (r.get("final_answer") or "").replace("\n", " "),
                 })
@@ -71,7 +76,7 @@ def main():
               + (f"  (파라미터 불일치: {', '.join(bad)})" if bad else ""))
         time.sleep(0.5)  # 무료 티어 429 방지
 
-    n = len(QUESTIONS)
+    n = len(CASES)
     print(f"\n의도 정확도 {ok_intent}/{n}, 파라미터 정확도 {ok_params}/{n}")
 
     fields = list(dict.fromkeys(k for r in rows for k in r))
