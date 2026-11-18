@@ -12,6 +12,7 @@
 
 import json
 import math
+from datetime import date
 from typing import Optional
 
 import pandas as pd
@@ -27,6 +28,8 @@ RELIABLE_MARKET_SHARE = 2.0  # 시장 비교 때 전체 거래량 중 비중(%)�
 SIMILAR_PCT = 5              # 차이가 이보다 작으면 "비슷해요" (응답 프롬프트 규칙 10과 같게)
 MIN_PAIRS = 5                # 세척·흙 짝 비교에 필요한 최소 짝 수
 RECENT_DAYS = 14             # "최근 흐름" 비교 기간
+MIN_COMMON_MARKETS = 5       # 전년 비교 공통 시장이 이보다 적으면 "대표성 낮음"
+MIN_COMMON_COVER = 50        # 공통 시장이 올해 거래량의 이 비율(%) 미만이면 "대표성 낮음"
 
 STATUS_KO = {
     "cache": "API 연결이 불안정해 저장된 데이터",
@@ -179,7 +182,7 @@ def summarize_cultivars(fetched: dict, out: dict) -> dict:
     for cultivar, result in (fetched.get("jeju_hub") or {}).items():
         df = records_df(result)
         if df.empty:
-            out["caveats"].append(f"{cultivar}: 조회 기간에 거래 데이터가 없어요.")
+            out["caveats"].append(f"{cultivar}은 조회 기간에 거래 데이터가 없어요.")
             continue
         frames[cultivar] = df
 
@@ -187,15 +190,23 @@ def summarize_cultivars(fetched: dict, out: dict) -> dict:
         prev_df = records_df((fetched.get("jeju_hub_prev") or {}).get(cultivar))
         prev_avg = change = None
         common = []
+        low_cover = False
         if not prev_df.empty:
             cur_c, prev_c, common = common_markets(df, prev_df)
             prev_avg = wavg(prev_c)
             change = pct(wavg(cur_c), prev_avg)
             n_cur, n_prev = df["market"].nunique(), prev_df["market"].nunique()
-            if n_cur != n_prev or len(common) < max(n_cur, n_prev):
+            if len(common) < max(n_cur, n_prev):
                 out["caveats"].append(
-                    f"{cultivar}: 거래 시장 수가 올해 {n_cur}곳, 전년 {n_prev}곳으로 달라서 "
+                    f"{cultivar}은 올해({n_cur}곳)와 전년({n_prev}곳)의 거래 시장 구성이 달라 "
                     f"두 해 모두 거래된 {len(common)}곳만 골라 전년과 비교했어요."
+                )
+            cover = float(cur_c["volume_ton"].sum()) / float(df["volume_ton"].sum()) * 100 if df["volume_ton"].sum() > 0 else 0
+            if len(common) < MIN_COMMON_MARKETS or cover < MIN_COMMON_COVER:
+                low_cover = True
+                out["caveats"].append(
+                    f"{cultivar}은 전년 비교에 쓴 공통 시장이 {len(common)}곳(올해 거래량의 {cover:.0f}%)뿐이라 "
+                    "전년 대비 변동률은 대표성이 낮아요."
                 )
         total_vol = float(df["volume_ton"].sum())
 
@@ -210,16 +221,19 @@ def summarize_cultivars(fetched: dict, out: dict) -> dict:
             out["facts"][cultivar]["공통 시장 올해 가중평균가(원/kg)"] = r0(wavg(common_markets(df, prev_df)[0]))
             out["facts"][cultivar]["공통 시장 전년 가중평균가(원/kg)"] = r0(prev_avg)
             out["facts"][cultivar]["전년 대비 변동률(%)"] = r1(change)
-            out["facts"][cultivar]["전년 대비 판정"] = verdict(change)
+            out["facts"][cultivar]["전년 대비 판정"] = (
+                "두 해 모두 거래된 시장이 적어 전년과 비교하기 어려워요 (변동률은 참고용)" if low_cover else verdict(change)
+            )
 
         if total_vol < LOW_VOLUME_TON:
-            out["caveats"].append(f"{cultivar}: 조회 기간 총 거래량이 적어(5톤 미만) 가격의 대표성이 낮아요.")
+            out["caveats"].append(f"{cultivar}은 조회 기간 총 거래량이 적어(5톤 미만) 가격의 대표성이 낮아요.")
 
         if avg:
             out["metrics"].append({
                 "label": f"{cultivar} 가중평균가",
                 "value": f"{avg:,.0f}원/kg",
-                "delta": f"{change:+.1f}% (전년 대비, 공통 시장)" if change is not None else None,
+                "delta": (f"{change:+.1f}% (전년 대비, {'참고용' if low_cover else '공통 시장'})"
+                          if change is not None else None),
             })
     return frames
 
@@ -307,7 +321,7 @@ def analyze_market(frames: dict, out: dict, target_market: Optional[str]):
             info["판정"] = verdict(info["두 시장 차이(%)"], diff.get("ci_low"), diff.get("ci_high"))
         else:
             out["caveats"].append(
-                f"{cultivar}: 거래일 {RELIABLE_MARKET_DAYS}일·거래량 비중 {RELIABLE_MARKET_SHARE:g}% 이상인 시장이 "
+                f"{cultivar}은 거래일 {RELIABLE_MARKET_DAYS}일·거래량 비중 {RELIABLE_MARKET_SHARE:g}% 이상인 시장이 "
                 "2곳 미만이라 시장 비교의 신뢰도가 낮아요."
             )
 
@@ -322,16 +336,23 @@ def analyze_market(frames: dict, out: dict, target_market: Optional[str]):
                     "차이(%)": r1(pct(ms.loc[m, "price"], wavg(others))),
                 }
             else:
-                out["caveats"].append(f"{cultivar}: 조회 기간에 '{target_market}' 거래가 없어요.")
+                out["caveats"].append(f"{cultivar}은 조회 기간에 '{target_market}' 거래가 없어요.")
 
         out["facts"][cultivar]["시장 비교"] = info
-        for m, p in ms["price"].head(8).items():
-            chart_rows.setdefault(m, {"market": m})[cultivar] = r0(p)
+        shown = reliable if len(reliable) else ms.head(5)
+        for m in shown.index:
+            row = chart_rows.setdefault(m, {"market": m, "_ton": 0.0})
+            row[cultivar] = r0(ms.loc[m, "price"])
+            row["_ton"] += float(ms.loc[m, "volume_ton"])
 
     if chart_rows:
+        ranked = sorted(chart_rows.values(), key=lambda r: -r.pop("_ton"))[:8]
+        for k, r in enumerate(ranked, 1):
+            r["market"] = f"{k}. {r['market']}"     # 거래량 순위를 붙여 순서 유지
         out["chart"] = {
-            "title": "시장별 가중평균 가격 (원/kg, 거래량 많은 순)", "x": "market", "type": "bar",
-            "y": list(frames.keys()), "data": list(chart_rows.values()),
+            "title": f"시장별 가중평균 가격 (원/kg, 거래량 비중 {RELIABLE_MARKET_SHARE:g}% 이상 시장, 거래량 많은 순)",
+            "x": "market", "type": "bar", "horizontal": True,
+            "y": list(frames.keys()), "data": ranked,
         }
 
 
@@ -386,7 +407,7 @@ def analyze_months(frames: dict, out: dict):
         monthly = {m: r0(wavg(df[df["ym"] == m])) for m in months}
         info = {"월별 가중평균가(원/kg)": monthly}
         for m, p in monthly.items():
-            chart_rows.setdefault(m, {"month": m})[cultivar] = p
+            chart_rows.setdefault(m, {"month": f"{int(m[:4])}년 {int(m[5:7])}월"})[cultivar] = p
 
         if len(months) == 2:   # "1월 vs 2월" 같은 두 달 비교
             a, b = months
@@ -405,10 +426,10 @@ def analyze_months(frames: dict, out: dict):
 
     if chart_rows:
         out["chart"] = {
-            "title": "월별 가중평균 가격 (원/kg)", "x": "month", "type": "bar",
+            "title": "월별 가중평균 가격 (원/kg)", "x": "month", "type": "bar", "horizontal": True,
             "y": list(frames.keys()), "data": list(chart_rows.values()),
         }
-    out["caveats"].append("과거 같은 시기의 가격 흐름이며, 올해 가격이 같게 움직인다는 보장은 없어요.")
+    out["caveats"].append("과거 기록의 흐름이며, 앞으로도 같은 흐름이 반복된다는 보장은 없어요.")
 
 
 def analyze_volume(frames: dict, fetched: dict, out: dict):
@@ -430,7 +451,31 @@ def analyze_volume(frames: dict, fetched: dict, out: dict):
             info["공통 시장 올해 총거래량(톤)"] = r1(total)
             info["공통 시장 전년 총거래량(톤)"] = r1(prev_total)
             info["전년 대비 거래량 변동률(%)"] = r1(change)
-            info["판정"] = verdict(change)
+            cover = total / float(df["volume_ton"].sum()) * 100 if df["volume_ton"].sum() > 0 else 0
+            if len(common) < MIN_COMMON_MARKETS or cover < MIN_COMMON_COVER or change is None:
+                info["판정"] = "두 해 모두 거래된 시장이 적어 전년과 비교하기 어려워요 (변동률은 참고용)"
+            elif abs(change) < SIMILAR_PCT:
+                info["판정"] = "전년 같은 기간과 비슷해요"
+            else:
+                info["판정"] = f"전년 같은 기간보다 {'많은' if change > 0 else '적은'} 편이에요"
+        base_df = records_df((fetched.get("jeju_hub_base") or {}).get(cultivar))
+        if not base_df.empty and out.get("base_period"):
+            cur_c, base_c, common = common_markets(df, base_df)
+            cur_days, base_days = out["_cur_days"], out["_base_days"]
+            cur_rate = float(cur_c["volume_ton"].sum()) / cur_days
+            base_rate = float(base_c["volume_ton"].sum()) / base_days
+            change = pct(cur_rate, base_rate)
+            info["최근 기준 기간"] = out["base_period"]
+            info["비교 기준"] = f"두 기간 모두 거래된 시장 {len(common)}곳, 달력 기준 하루 평균"
+            info["이번 기간 하루 평균 거래량(톤)"] = r1(cur_rate)
+            info["최근 기준 기간 하루 평균 거래량(톤)"] = r1(base_rate)
+            info["최근 기준 대비 변동률(%)"] = r1(change)
+            if change is None or len(common) < 2:
+                info["판정"] = "비교할 시장이 적어 많고 적음을 판단하기 어려워요"
+            elif abs(change) < SIMILAR_PCT:
+                info["판정"] = "최근 3개월 하루 평균과 비슷해요"
+            else:
+                info["판정"] = f"최근 3개월 하루 평균보다 {'많은' if change > 0 else '적은'} 편이에요"
         out["facts"][cultivar]["거래량"] = info
 
     if fetched.get("jeju_hub_prev"):
@@ -451,20 +496,52 @@ def analyze_volume(frames: dict, fetched: dict, out: dict):
 
 
 def analyze_weather(fetched: dict, out: dict):
-    """기상 예보 요약과 출하 위험일"""
+    """기상 예보 요약과 출하 위험일. 이미 지난 날짜는 빼고, 오래된 저장 예보면 안내"""
     weather = fetched.get("weather")
     if not weather:
         return
+    today = date.today().isoformat()
+    days = [d for d in weather.get("daily", []) if str(d.get("date", "")) >= today]
     risks = []
-    for d in weather.get("daily", []):
+    for d in days:
         if d.get("wind_max", 0) >= 10:
             risks.append(f"{d['date']} 강풍 주의 (최대 {d['wind_max']}m/s)")
         if d.get("pop_max", 0) >= 60 and d.get("rain_hours", 0) >= 5:
             risks.append(f"{d['date']} 비 예보 (강수확률 {d['pop_max']}%, 약 {d['rain_hours']}시간)")
         if d.get("tmp_min") is not None and d["tmp_min"] <= 0:
             risks.append(f"{d['date']} 영하권 추위 (최저 {d['tmp_min']}℃)")
-    out["weather"] = {"location": weather.get("location"), "daily": weather.get("daily"), "risks": risks}
-    out["caveats"].append("날씨가 가격을 얼마나 바꾸는지는 이 데이터로 확인할 수 없어요. 예보는 앞으로 약 4일 범위예요.")
+    out["weather"] = {"location": weather.get("location"), "daily": days, "risks": risks}
+
+    base = str(weather.get("base") or "")
+    base_ko = f"{int(base[4:6])}월 {int(base[6:8])}일 {int(base[9:11])}시" if len(base) >= 11 and base[:8].isdigit() else None
+    if weather.get("data_status") in ("cache", "mock") and base_ko:
+        out["caveats"].append(f"최신 예보를 가져오지 못해 저장된 예보({base_ko} 발표)를 보여 드려요.")
+    if not days:
+        out["caveats"].append("저장된 예보가 오래돼 앞으로의 날씨는 확인할 수 없어요.")
+    else:
+        out["caveats"].append("예보는 앞으로 약 4일 범위예요.")
+
+
+def fmt_iso(d: str) -> str:
+    """2026-11-18 → 2026년 11월 18일"""
+    return fmt_date(str(d).replace("-", "")[:8])
+
+
+def period_shift_note(params: dict, period: dict) -> Optional[str]:
+    """요청한 달이 아직 오지 않아 이전 해 같은 달로 대신했을 때, 실제 연도를 밝힌 안내.
+    (예: 11월에 '1월'을 물으면 내년 1월 대신 올해 1월 기록을 보여 줌 → '지난해'라고 쓰면 틀림)"""
+    if not period.get("note") or not period.get("start"):
+        return None
+    req = sorted(str(m) for m in (params.get("months") or []) if len(str(m)) == 6)
+    a_s, a_e = str(period["start"]), str(period["end"])
+    def label(y, m1, m2):
+        return f"{y}년 {m1}월" if m1 == m2 else f"{y}년 {m1}~{m2}월"
+    act = label(int(a_s[:4]), int(a_s[4:6]), int(a_e[4:6]))
+    rel = {0: "올해", 1: "지난해"}.get(date.today().year - int(a_s[:4]), f"{int(a_s[:4])}년")
+    if req:
+        reqs = label(int(req[0][:4]), int(req[0][4:]), int(req[-1][4:]))
+        return f"요청한 {reqs}은 아직 오지 않아, 가장 최근 같은 달인 {act}({rel}) 기록으로 대신 확인했어요."
+    return f"요청한 기간이 아직 오지 않아 {act}({rel}) 기록으로 대신 확인했어요."
 
 
 # ---------------------------------------------------------------
@@ -481,6 +558,11 @@ def analyze(state: dict) -> dict:
         out["data_period"] = f"{fmt_date(period.get('start'))} ~ {fmt_date(period.get('end'))}"
         if period.get("prev_start"):
             out["compare_period"] = f"{fmt_date(period.get('prev_start'))} ~ {fmt_date(period.get('prev_end'))}"
+        if period.get("base_start"):
+            out["base_period"] = f"{fmt_date(period.get('base_start'))} ~ {fmt_date(period.get('base_end'))}"
+            _d = lambda x: date(int(x[:4]), int(x[4:6]), int(x[6:8]))
+            out["_cur_days"] = (_d(period["end"]) - _d(period["start"])).days + 1
+            out["_base_days"] = (_d(period["base_end"]) - _d(period["base_start"])).days + 1
 
     frames = summarize_cultivars(fetched, out)
 
@@ -501,11 +583,27 @@ def analyze(state: dict) -> dict:
 
     analyze_weather(fetched, out)
 
-    if period.get("note"):
+    shift_note = period_shift_note(params, period)
+    if shift_note:
+        out["caveats"].append(shift_note)
+    elif period.get("note"):
         out["caveats"].append(period["note"])
 
+    periods = {"거래 데이터 기간": out.get("data_period")}
+    if out.get("compare_period"):
+        periods["전년 비교 기간"] = out["compare_period"]
+    if out.get("base_period"):
+        periods["최근 기준 기간"] = out["base_period"]
+    out.pop("_cur_days", None)
+    out.pop("_base_days", None)
+    days = (out.get("weather") or {}).get("daily") or []
+    if days:
+        periods["날씨 예보 기간"] = f"{fmt_iso(days[0]['date'])} ~ {fmt_iso(days[-1]['date'])}"
+    if any(periods.values()):
+        out["facts"]["분석 기간"] = {k: v for k, v in periods.items() if v}
+
     # 데이터 상태: live가 아니면 화면·답변에 안내
-    statuses = {r.get("data_status") for k in ("jeju_hub", "jeju_hub_prev") for r in (fetched.get(k) or {}).values()}
+    statuses = {r.get("data_status") for k in ("jeju_hub", "jeju_hub_prev", "jeju_hub_base") for r in (fetched.get(k) or {}).values()}
     if fetched.get("weather"):
         statuses.add(fetched["weather"].get("data_status"))
     statuses -= {"live", None}

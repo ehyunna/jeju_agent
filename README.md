@@ -68,8 +68,18 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-> Windows에서 `python`, `pip` 명령이 인식되지 않으면 `py`, `py -m pip`를 사용하세요.
-> 예: `py -m pip install -r requirements.txt`
+#### Windows에서 막힐 때
+
+- `python`을 입력했는데 `Python`이라는 글자만 나오거나 Microsoft Store가 열리면, Windows 기본 바로가기가 잡힌 것입니다. `py`를 쓰거나(예: `py -m pip install -r requirements.txt`) 아래처럼 가상환경의 파이썬을 경로로 직접 실행하세요.
+- `.venv\Scripts\activate`에서 "이 시스템에서 스크립트를 실행할 수 없으므로" 오류가 나면, activate 없이 가상환경 파이썬을 직접 부르면 됩니다.
+
+```powershell
+py -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe -m streamlit run app.py
+```
+
+(activate를 쓰고 싶다면 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`를 한 번 실행한 뒤 다시 시도하세요.)
 
 ### API 키 설정
 
@@ -90,6 +100,8 @@ cp .env.example .env        # Windows PowerShell: copy .env.example .env
 허브·기상청 키를 넣었더라도 API 호출이 실패하면 자동으로 저장 데이터로 답하고, 화면에 "💾 저장된 데이터 사용 중"이 표시됩니다.
 
 `.env`는 `.gitignore`에 포함되어 있으니 키를 커밋하지 마세요.
+
+화면의 "에이전트가 한 일 보기"에 `401 UNAUTHENTICATED` / `API key not valid`가 보이면 `GEMINI_API_KEY`가 잘못 입력된 것입니다. `your_key_here`가 남아 있지 않은지, 키 앞뒤에 따옴표나 공백이 없는지 확인하세요.
 
 ## 4. 실행
 

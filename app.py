@@ -43,6 +43,11 @@ EXAMPLE_QUESTIONS = [
 # 결과 표시 함수
 # analysis가 문자열이어도, dict여도 동작하게 작성
 # ---------------------------------------------------------------
+def md(text) -> str:
+    """Streamlit 마크다운은 ~ 사이 글자를 취소선으로 바꿈 (예: "1~2월 … 11월 1일 ~ 18일") → 이스케이프"""
+    return str(text).replace("~", "\\~")
+
+
 def show_analysis(analysis):
     """analyzer 결과를 보여준다. 문자열이면 글로, dict면 숫자 카드·차트·표로."""
     if not analysis:
@@ -76,7 +81,14 @@ def show_analysis(analysis):
         if chart.get("title"):
             st.markdown(f"**{chart['title']}**")
         if chart.get("type") == "bar":
-            st.bar_chart(df)
+            # 품목별 막대는 쌓지 않고 나란히, 시장·월 이름이 긴 차트는 가로 막대로 (이름이 눕지 않게)
+            opts = {"stack": False}
+            if chart.get("horizontal"):
+                opts["horizontal"] = True
+            try:
+                st.bar_chart(df, **opts)
+            except TypeError:                   # 옛 Streamlit 버전에는 stack·horizontal 인자가 없음
+                st.bar_chart(df)
         else:
             st.line_chart(df)
 
@@ -87,9 +99,9 @@ def show_analysis(analysis):
 
     # 4) 데이터 기간·한계
     if analysis.get("data_period"):
-        st.caption(f"📅 데이터 기간: {analysis['data_period']}")
+        st.caption(md(f"📅 데이터 기간: {analysis['data_period']}"))
     for c in analysis.get("caveats") or []:
-        st.caption(f"⚠️ {c}")
+        st.caption(md(f"⚠️ {c}"))
 
 
 def show_details(result: dict):
@@ -114,8 +126,8 @@ def show_details(result: dict):
                 for warn in validation.get("warnings") or []:
                     st.caption(f"- 💡 {warn}")
 
-        if result.get("retry_count"):
-            st.markdown(f"**재시도 횟수:** {result['retry_count']}")
+        if "retry_count" in result:
+            st.markdown(f"**답변 재생성:** {result.get('retry_count') or 0}회 (검증 실패 시 최대 2회)")
 
         for err in result.get("errors") or []:
             st.warning(err)
@@ -136,7 +148,7 @@ def show_data_status(analysis):
 
 def show_assistant_message(result: dict):
     show_data_status(result.get("analysis"))
-    st.markdown(result.get("final_answer") or "답변을 만들지 못했어요.")
+    st.markdown(md(result.get("final_answer") or "답변을 만들지 못했어요."))
     show_analysis(result.get("analysis"))
 
     sources = result.get("sources") or []

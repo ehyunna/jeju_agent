@@ -43,6 +43,10 @@ DEFAULT_DAYS = 60  # 월을 지정하지 않았을 때 최근 며칠을 볼지
 MIN_MARKET_VOLUME = 0.1  # 시장별 표에 넣을 최소 거래량(톤). 소량 거래의 이상값 제외
 MIN_DAY_VOLUME = 0.3     # 일별 추이 차트에 넣을 하루 최소 거래량(톤). 소량 거래일의 튀는 가격 제외
 WEATHER_KEYWORDS = ["날씨", "기온", "한파", "강풍", "태풍", "예보", "추위", "바람"]
+# "많은 편이야?"처럼 기준이 있어야 답할 수 있는 의도: 비교 연도를 말하지 않으면 직전 기간(기준 기간)을 함께 가져온다.
+# (전년과 비교하면 2026년 3월부터 허브 집계 범위가 늘어 왜곡되므로, 같은 해 안의 최근 기간을 기준으로 삼음)
+AUTO_BASELINE = {"volume_status"}
+BASELINE_DAYS = 90
 STATUS_KO = {
     "cache": "API 연결이 불안정해 저장된 데이터",
     "mock": "테스트용 저장 데이터",
@@ -155,6 +159,16 @@ def data_fetcher(state: CarrotState) -> CarrotState:
                     fetched["jeju_hub_prev"][c] = get_daily_trades(c, _fmt(prev_start), _fmt(prev_end))
                 except Exception as e:  # noqa: BLE001
                     state["errors"].append(f"전년 허브 데이터 조회 실패({c}): {e}")
+        if intent in AUTO_BASELINE and not prev_start:
+            base_end = start - timedelta(days=1)
+            base_start = start - timedelta(days=BASELINE_DAYS)
+            params["period"]["base_start"], params["period"]["base_end"] = _fmt(base_start), _fmt(base_end)
+            fetched["jeju_hub_base"] = {}
+            for c in cultivars:
+                try:
+                    fetched["jeju_hub_base"][c] = get_daily_trades(c, _fmt(base_start), _fmt(base_end))
+                except Exception as e:  # noqa: BLE001
+                    state["errors"].append(f"기준 기간 허브 데이터 조회 실패({c}): {e}")
 
     if need_weather:
         region = params.get("region")
