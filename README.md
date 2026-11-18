@@ -103,6 +103,11 @@ cp .env.example .env        # Windows PowerShell: copy .env.example .env
 
 화면의 "에이전트가 한 일 보기"에 `401 UNAUTHENTICATED` / `API key not valid`가 보이면 `GEMINI_API_KEY`가 잘못 입력된 것입니다. `your_key_here`가 남아 있지 않은지, 키 앞뒤에 따옴표나 공백이 없는지 확인하세요.
 
+#### 평가용 키 (심사위원용)
+
+- 제출 ZIP에는 평가용 Gemini API 키를 `평가용_API_KEY.txt`로 함께 넣었습니다. 이 키를 `.env`의 `GEMINI_API_KEY`에 넣고 `USE_MOCK_DATA=true`로 실행하면 됩니다. (평가 기간이 끝나면 키는 폐기합니다.)
+- 제주데이터허브·기상청 키는 대회 규정에 따라 제출물에 포함하지 않았습니다. 위 표의 발급처에서 직접 발급해 `.env`에 넣으면 실시간 데이터로 동작합니다.
+
 ## 4. 실행
 
 ```bash
@@ -171,7 +176,21 @@ jeju_agent/
 - **세척·흙 짝 비교**: 전체 평균끼리 비교하면 시장 구성 차이가 섞여 결론이 뒤집힐 수 있어(전체 평균 +411원 vs 짝 비교 −30원), 같은 날·같은 시장끼리 짝지어 평균 차이 Ȳ와 95% 신뢰구간(Ȳ ± t·S/√n)을 계산합니다.
 - **두 기간 비교**: 일별 가중평균 가격으로 Welch 방법의 95% 신뢰구간을 계산해, 0을 포함하면 "우연일 수도 있어요"로 판정합니다.
 
-## 8. 한계
+## 8. 자주 나는 오류와 대응
+
+| 증상 | 원인 | 대응 |
+|---|---|---|
+| `401 UNAUTHENTICATED` / `API key not valid` | Gemini 키가 틀림 | `.env`의 `GEMINI_API_KEY` 확인 (따옴표·공백 없이) |
+| `429` / `RESOURCE_EXHAUSTED`, 답변이 늦음 | Gemini 호출 한도 초과 | 자동으로 대기 후 재시도합니다. 계속되면 잠시 뒤 다시 질문하거나 한도가 넉넉한 키 사용 |
+| "데이터를 가져왔지만 답변을 만들지 못했어요" | Gemini 호출이 끝내 실패 | 인터넷 연결과 키 확인. 화면의 검증 결과는 "확인 필요"로 표시됩니다 |
+| 답변까지 약 1분 걸리고 "💾 저장된 데이터 사용 중" 표시 | 허브 키가 없거나 틀림, 허브 서버 오류(502) | 정상 동작입니다(최대 5회 재시도 후 저장 데이터로 답변). 빠르게 확인하려면 `USE_MOCK_DATA=true` |
+| "최신 예보를 가져오지 못해 저장된 예보(…발표)를 보여 드려요" | 기상청 키가 없거나 호출 실패 | 마지막으로 저장된 예보를 사용합니다. 실시간 예보는 `DATA_GO_KR_KEY` 설정 |
+| `python`을 찾을 수 없음, `activate` 실행 불가 | Windows 기본 설정 | 3장의 "Windows에서 막힐 때" 참고 |
+| `ModuleNotFoundError` | 패키지 미설치 또는 다른 폴더에서 실행 | 저장소 폴더 안에서 `pip install -r requirements.txt` 후 다시 실행 |
+
+외부 서비스 의존성: Gemini API는 **필수**(인터넷 필요), 제주데이터허브(일 3,000회)·기상청(일 10,000회) API는 **선택**이며 실패 시 저장 데이터로 대체합니다.
+
+## 9. 한계
 
 - 미래 가격을 예측하지 않습니다. 과거 같은 시기의 흐름과 현재 수준을 보여 줄 뿐입니다.
 - 세척 비용·운송비 등 농가별 비용 데이터가 없어 실제 수익 차이는 판단하지 않습니다.
@@ -179,6 +198,9 @@ jeju_agent/
 - 허브 데이터는 2026년 3월 무렵부터 집계 건수가 크게 늘어, 거래량 증감에는 집계 범위 변화가 섞여 있을 수 있습니다.
 - 자세한 내용은 [DATA_SPEC.md](DATA_SPEC.md) 6장을 참고하세요.
 
-## 9. 사용 기술
+## 10. 사용 기술
 
 Python 3.11 · LangGraph · LangChain (Google GenAI) · Gemini · pandas · Streamlit · requests · python-dotenv · pydantic
+
+- **LLM**: Google Gemini `gemini-3.5-flash-lite` (의도 분류·답변 생성). `.env`에 `GEMINI_MODEL=모델명`을 넣으면 다른 Gemini 모델로 바꿀 수 있습니다.
+- **라이브러리 버전**: `requirements.txt`에 고정 (langgraph 1.2.21, langchain-google-genai 4.5.0, google-genai 3.3.0, pandas 3.0.6, streamlit 1.67.0 등)
