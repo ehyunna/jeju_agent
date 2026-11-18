@@ -57,7 +57,8 @@ def _to_df(rows):
     df["date"] = pd.to_datetime(df["date"], format="%Y%m%d").dt.strftime("%Y-%m-%d")
     for c in ["price", "volume_ton", "amount_mil"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
-    return df
+    # 같은 날·시장·법인이라도 가격·거래량이 다르면 별개 거래라 모두 남기고, 모든 값이 같은 행만 하나로 합침
+    return df.drop_duplicates()
 
 
 def _save_snapshot(cultivar, df):
@@ -67,7 +68,8 @@ def _save_snapshot(cultivar, df):
     path = SNAPSHOT_DIR / f"{cultivar}.csv"
     if path.exists():
         df = pd.concat([pd.read_csv(path), df])
-    df = df.drop_duplicates(["date", "market", "corporation"], keep="last").sort_values(["date", "market"])
+    # 같은 날·시장·법인에 거래가 여러 건일 수 있으므로 모든 값이 같은 행만 중복으로 제거
+    df = df.drop_duplicates(list(COLS.values()), keep="last").sort_values(["date", "market"])
     df.to_csv(path, index=False, encoding="utf-8-sig")
 
 
